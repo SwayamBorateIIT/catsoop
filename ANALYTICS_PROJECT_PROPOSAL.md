@@ -2,9 +2,9 @@
 
 **Course:** Software Tools and Techniques for CSE
 
-**Institute:** IIT Gandhinagar
 
-**Project type:** Semester project — extending an existing open-source system
+**Project Name:** Extending an existing open-source system
+
 **Submission:** 1 — Problem understanding and proposed design
 
 ---
@@ -17,7 +17,7 @@ The platform does a good job of delivering content and grading answers. What it 
 
 We propose to build a **course analytics dashboard** for instructors. It will read the activity data CAT-SOOP already produces, organise it into a form suited to analysis, and present it as a set of clear views — course overview, module-wise progress, question difficulty, individual student progress, and a list of students who may need attention.
 
-The system will sit alongside CAT-SOOP rather than inside it. CAT-SOOP remains the authoritative source of all data, and we will change almost nothing in it.
+The dashboard will be built **into CAT-SOOP itself** as a new set of pages within the course, using the platform's existing login and permissions. Only the heavy calculation runs outside, on a schedule. CAT-SOOP remains the authoritative source of all data, and no file in the platform's own source code is modified.
 
 ---
 
@@ -146,115 +146,123 @@ The conclusion is encouraging: **almost everything is already there.** The proje
 
 ### The overall idea
 
-We will build a **separate application that reads from CAT-SOOP and presents analytics**, rather than building the analytics inside CAT-SOOP.
+We will add the analytics dashboard **to CAT-SOOP as new pages inside the course**, rather than building a separate website beside it.
 
-The reasoning is simple. Analytics questions like "average score across all modules for all students" require looking at a large amount of data at once. If we computed that inside CAT-SOOP while a user waits for a page to load, it would be slow — and we can already see the existing staff views suffering from exactly this problem. Instead, we compute the numbers ahead of time, store the results, and serve them instantly when the dashboard is opened.
+There is one difficulty to solve first. Analytics questions like "average score across all modules for all students" require looking at a large amount of data at once. Doing that while a user waits for a page to load would be slow, and would compete with students trying to submit answers — we can already see CAT-SOOP's two existing staff views suffering from exactly this problem.
+
+The solution is to **separate calculating from displaying**. A background program calculates all the figures on a schedule and stores the results. The pages inside CAT-SOOP then only read those stored results, which is fast enough to serve like any other course page.
+
+This gives us the best of both: the dashboard is genuinely part of the course site, with no separate login or address to maintain, and none of the expensive work happens while anyone is waiting.
 
 ### The pipeline
 
+The analytics dashboard is **part of CAT-SOOP, not a separate website**. It is a set of new pages added to the course, reachable at ordinary CAT-SOOP addresses, using CAT-SOOP's own login and permissions.
+
+What sits outside CAT-SOOP is only the part that does the heavy calculation, and that runs on a schedule in the background rather than while anyone is waiting:
+
 ```
-   CAT-SOOP              (unchanged — the source of truth)
-      │
-      │  reads activity records
-      ▼
-   Extractor             (Python; asks CAT-SOOP for its data)
-      │
-      │  cleans and organises
-      ▼
-   Analytics Database    (PostgreSQL; organised for analysis)
-      │
-      │  pre-calculated summaries
-      ▼
-   Analytics API         (serves numbers as data)
-      │
-      ▼
-   Dashboard             (what the professor actually sees)
+  ┌──────────────────────── CAT-SOOP ────────────────────────┐
+  │                                                          │
+  │   Course pages          Analytics pages   ← we add these │
+  │   /digital-systems      /digital-systems/analytics       │
+  │        │                          ▲                      │
+  │        │ activity records         │ reads summaries      │
+  └────────┼──────────────────────────┼──────────────────────┘
+           │                          │
+           ▼                          │
+     ┌───────────┐            ┌───────────────┐
+     │ Extractor │──────────► │   Analytics   │
+     │ (nightly, │            │   Database    │
+     │  offline) │            │               │
+     └───────────┘            └───────────────┘
 ```
 
-Alongside this, one small plugin sits inside the course folder in CAT-SOOP and records page visits into CAT-SOOP's own logs, where our extractor picks them up along with everything else.
+The important separation is **when** work happens:
 
-### The five components
+- **Slow work happens offline.** Reading every student's history and calculating averages, completion rates and difficulty is done by the extractor on a schedule, when nobody is waiting.
+- **Fast work happens in the page.** When the professor opens the dashboard, the page reads a handful of already-calculated summary rows and draws them. It never recalculates anything.
+
+This is what makes it safe to serve the dashboard from inside CAT-SOOP. The concern with putting analytics in the course web server is that a heavy query would block students trying to submit answers. Because the numbers are already computed, opening the dashboard is no more expensive than opening any other course page.
+
+### The four components
 
 **1. Page-visit plugin**
-A small piece of code placed in the course's folder. It notes when a student opens a module. It records one visit per module per session rather than every single page load, so the data stays meaningful and the volume stays low. This is the only thing we add inside CAT-SOOP.
+A small piece of code placed in the course's folder. It notes when a student opens a module. It records one visit per module per session rather than every single page load, so the data stays meaningful and the volume stays low.
 
 **2. Extractor**
-A Python program that runs on a schedule. It asks CAT-SOOP for the student list, the course structure, and all activity since the last time it ran. It remembers where it stopped, so each run only processes what is new instead of re-reading the entire history. It also matches up submissions with the scores that arrived later from the background grader.
+A Python program that runs on a schedule, outside the web server. It asks CAT-SOOP for the student list, the course structure, and all activity since the last time it ran, then calculates the summaries. It remembers where it stopped, so each run only processes what is new instead of re-reading the entire history. It also matches up submissions with the scores that arrived later from the background grader.
 
 **3. Analytics database**
-A PostgreSQL database holding the organised data: students, modules, questions, attempts, visits, and pre-calculated summary tables. Kept deliberately separate from CAT-SOOP's own storage so that nothing we do can affect the running course.
+Holds the organised data: students, modules, questions, attempts, visits, and the pre-calculated summary tables. Kept separate from CAT-SOOP's own storage so nothing we do can affect the running course. If it were deleted, re-running the extractor would rebuild it.
 
-**4. Analytics API**
-A small web service that answers questions like "give me the module-wise summary for this course". It reads the pre-calculated summaries rather than recomputing anything, so responses are fast regardless of class size. It also checks that whoever is asking is actually an instructor — by asking CAT-SOOP, so that our idea of who is staff can never disagree with CAT-SOOP's.
+**4. Analytics pages inside CAT-SOOP**
+New pages added to the course folder. They read the summary tables and present them as charts and tables. Because they are ordinary CAT-SOOP pages, they automatically get the site's appearance, navigation, login and permission checks without us building any of it.
 
-**5. Dashboard**
-The web interface the professor uses. Charts, tables, filters, search, and the ability to click from a summary down to the detail behind it. Data is fetched a page at a time, so the interface stays responsive whether the course has 250 students or 10,000.
+### The routes
 
-### Why we keep CAT-SOOP as the source of truth
+CAT-SOOP decides what page to show based on the folder structure of the course, so adding pages means adding folders. The analytics pages live in a folder called `analytics` inside the course:
 
-We never write anything back into CAT-SOOP, and we never modify its data. If our database were deleted entirely, we could rebuild it from scratch by re-running the extractor. This is an important safety property for a system that has to run alongside a live course.
-
-### Where the dashboard lives — one website, not two
-
-Although the dashboard is a separate program, it will appear to users as **part of the same website**. The professor should not have to remember a second address or log in a second time.
-
-This is achieved with a **reverse proxy** — a standard piece of web server configuration that sits in front of both programs and decides which one handles each address:
-
-```
-                         iitgn.ac.in
-                               │
-                       ┌───────┴────────┐
-                       │  reverse proxy │   (nginx or Caddy)
-                       └───────┬────────┘
-              ┌────────────────┴────────────────┐
-              ▼                                 ▼
-   anything ending in /analytics          everything else
-              │                                 │
-          Dashboard                          CAT-SOOP
-```
-
-### The address always names the course
-
-A server can host many courses, so there can be no single "the dashboard". **Analytics live underneath the course they belong to**, mirroring how CAT-SOOP already organises everything:
-
-| Address | What it is |
+| Address | Page |
 |---|---|
-| `/digital-systems` | The Digital Systems course — CAT-SOOP |
-| `/digital-systems/analytics` | Analytics for Digital Systems |
-| `/digital-systems/analytics/modules` | Module breakdown for that course |
-| `/signals-systems` | A different course — CAT-SOOP |
-| `/signals-systems/analytics` | Analytics for *that* course |
-| `/analytics` | Course picker, if a person teaches several |
+| `/digital-systems` | Course home (existing) |
+| `/digital-systems/analytics` | Overview — the whole class at a glance |
+| `/digital-systems/analytics/modules` | Module-by-module breakdown |
+| `/digital-systems/analytics/questions` | Question difficulty |
+| `/digital-systems/analytics/students` | Student list, searchable |
+| `/digital-systems/analytics/students/<id>` | One student in detail |
+| `/digital-systems/analytics/attention` | Students who may need help |
 
-This reads naturally, and it matches CAT-SOOP's own convention where the course name always comes first. It also means the menu link inside a course can simply point at `COURSE/analytics`, using CAT-SOOP's existing shorthand for "the current course" — so the same link works in every course without being edited.
+Alongside these sit a few addresses that return data rather than a page, used by the charts to fetch numbers without reloading the whole page — for example when the professor changes a filter or a date range.
 
-Two consequences worth stating, because they follow from this choice rather than being extra work:
+Because the address always begins with the course, **everything is automatically scoped to that course.** The page knows which course it belongs to from where it sits, so there is no default course anywhere in the system and no possibility of one course's figures appearing under another's.
 
-- **The course is never assumed.** There is no default course anywhere in the system. Every page, every stored figure and every request carries the course it belongs to.
-- **Permission is checked per course.** A TA for Digital Systems opening `/signals-systems/analytics` is refused, because we ask CAT-SOOP whether *this* person is staff for *that* course. Teaching one course grants nothing anywhere else.
+A server can host many courses, and each simply gets its own copy of the folder:
 
-One practical detail: the proxy rule reserves the name `analytics` as the last part of a course address. A course would therefore not be able to have its own module called "analytics". This is a small, acceptable restriction, and we will note it in the deployment documentation rather than let a future instructor discover it by accident.
+```
+courses/
+├── digital-systems/
+│   ├── 01.number-systems/
+│   ├── 02.boolean-algebra/
+│   └── analytics/          ← dashboard for Digital Systems
+└── signals-systems/
+    ├── 01.fourier/
+    └── analytics/          ← dashboard for Signals & Systems
+```
+
+### How access is controlled
+
+This is where integrating into CAT-SOOP pays off most.
+
+CAT-SOOP works out who the visitor is and what they are allowed to do *before* it builds the page. Our analytics pages simply ask it. There is no separate login, no token to pass between systems, and no second list of who counts as an instructor.
+
+We place a single configuration file in the `analytics` folder that checks the visitor's permissions. Because CAT-SOOP passes settings down from a folder to everything inside it, **that one file protects every analytics page**, including any we add later. A student or guest reaching any of these addresses is refused by CAT-SOOP itself before our code runs.
+
+Permission is also naturally **per course**. A TA for Digital Systems opening `/signals-systems/analytics` is refused, because CAT-SOOP evaluates permissions for the course the address names. Teaching one course grants nothing anywhere else.
+
+The link into the dashboard is an ordinary entry in the course menu, shown only to staff.
 
 ### Handling multiple runs of the same course
 
-Courses repeat. Digital Systems in 2026 and in 2027 are the same course but different groups of students, and their data must never be mixed.
+Courses repeat. Digital Systems in 2026 and 2027 are the same course but different groups of students, and their data must never be mixed.
 
-CAT-SOOP handles this by giving each run its own folder — so `/digital-systems-2026` and `/digital-systems-2027` are separate courses as far as the platform is concerned, and therefore separate as far as we are concerned. Our design keeps them separate in storage too, while still recording that they are two runs of the same underlying course. That makes it possible to compare one year against another later on — for example, whether a module became easier after the professor rewrote it — without ever mixing the two cohorts in a single figure.
+CAT-SOOP already handles this by giving each run its own folder, so they are separate courses as far as the platform is concerned — and therefore separate as far as we are concerned. Our database keeps them separate too, while recording that they are two runs of the same underlying course. That makes it possible later to compare one year against another — for example, whether a module became easier after the professor rewrote it — without ever mixing two cohorts in a single figure.
 
-### Why not the alternatives
+### What we gain, and what we give up
 
-We considered two other arrangements and rejected both. A **separate address** (`analytics.iitgn.ac.in`) would count as a different site to the browser, requiring extra configuration to share the login, and it would lose the natural course-first structure. Serving the dashboard **from inside CAT-SOOP itself** would mean every heavy analytics calculation running inside the course web server, competing with students trying to submit answers — exactly the performance problem we are trying to avoid.
+Building inside CAT-SOOP rather than as a separate site is the right choice, but it is a genuine trade-off and we want to state both sides.
 
-### How the professor gets in
+**What we gain**
 
-The route into the dashboard is a normal menu item inside CAT-SOOP:
+- Login, permissions, appearance and navigation all come for free. This removes a substantial and error-prone piece of work.
+- Our idea of who is an instructor cannot drift out of step with CAT-SOOP's, because we do not have one.
+- No extra web server, no reverse proxy configuration, no second address to maintain.
+- The result is a genuine CAT-SOOP extension. Another course can adopt it by copying a folder, which is a far better outcome than a tool that only works for one course.
 
-1. The professor is already logged into CAT-SOOP as usual.
-2. An **Analytics** link appears in that course's menu — visible only to staff of that course.
-3. Clicking it hands over to the dashboard along with a short-lived pass confirming who they are, which course they are asking about, and that CAT-SOOP considers them staff there.
-4. The dashboard checks that pass and opens on that course.
+**What we give up**
 
-There is no separate account, no separate password, and no second login screen. CAT-SOOP stays the only place that decides who is an instructor, so our permissions can never disagree with the platform's.
+- We cannot use a modern frontend framework. CAT-SOOP pages are built on the server and enhanced with plain JavaScript, so features like sorting a large table need to be written more manually than they would in a purpose-built application. We consider this acceptable, and it keeps the project's technology consistent with the platform we are extending.
+- The database driver must be installed alongside CAT-SOOP. This is a small addition to the course server's setup, which we will document.
+- We must be disciplined about keeping the pages fast. If a page ever needed to calculate something expensive, it would compete with students submitting answers. Our rule is that **analytics pages only read pre-calculated summaries** — never raw activity — and we will treat any violation of that rule as a defect.
 
 ### Different landing pages for different roles
 
@@ -386,10 +394,12 @@ Finally, we will not report statistics for questions with very few attempts. A q
 |---|---|---|
 | Extractor | Python | Required — CAT-SOOP's data can only be read from Python |
 | Database | PostgreSQL | Reliable, well understood, handles the joins and summaries this project needs, and comfortably handles the data volumes involved |
-| API | FastAPI (Python) | Same language as the extractor so we share code; produces documentation automatically, which helps when different team members build the frontend |
-| Dashboard | React | The interface needs sorting, filtering, searching and drill-down across thousands of rows, which is more than a static page can do well |
-| Scheduling | Built-in scheduler | We have three periodic jobs. A heavier job-queue system would add infrastructure without adding value at this size |
-| Deployment | Docker Compose | One command brings up the whole system, so the professor or a future team can reproduce it easily |
+| Dashboard pages | CAT-SOOP's own page format | The dashboard is part of the course, so it is written the way every other CAT-SOOP page is written. This is what gives us login, permissions and site appearance for free |
+| Charts and tables | Plain JavaScript with a charting library | CAT-SOOP pages do not use a frontend framework, so we follow the platform's approach. A small charting library loaded by the page covers the visualisations |
+| Scheduling | A scheduled job (cron or equivalent) | We have three periodic tasks. A job-queue system would add infrastructure without adding value at this size |
+| Deployment | Alongside the existing CAT-SOOP installation | No extra web server or proxy configuration. The database and the scheduled job are the only new pieces to install |
+
+We deliberately did **not** choose a frontend framework such as React. It would be the natural choice for a standalone dashboard, but CAT-SOOP pages are built on the server and enhanced with plain JavaScript. Introducing a framework would mean fighting the platform rather than extending it, and would rule out the seamless integration that is the point of this approach.
 
 We chose PostgreSQL over specialised analytics databases deliberately. Those are designed for hundreds of millions of rows; our largest realistic case is around ten million, which PostgreSQL handles without difficulty. Choosing a heavier system would mean spending the semester learning to operate it instead of building the analytics.
 
@@ -416,7 +426,7 @@ The dashboard contains students' academic records, so access control is a core r
 - **Only instructors can see it.** Access is decided by asking CAT-SOOP whether the person is staff for that course. We do not maintain our own list of who is an instructor, so our rules cannot drift out of step with the platform's.
 - **Students and guests are refused.** They receive nothing, not a limited view.
 - **Hiding the link is not the same as blocking access.** The Analytics menu item is hidden from students and guests, but that is only a convenience. The dashboard checks permissions on every single request, so typing the address directly gets a student nowhere. We mention this explicitly because hiding a link and calling it security is a common and serious mistake.
-- **Sharing one address does not mean sharing one permission.** Putting the dashboard and CAT-SOOP behind the same address makes signing in seamless, but each request to the dashboard is still authorised independently.
+- **We inherit CAT-SOOP's checks rather than reimplementing them.** Because the analytics pages are CAT-SOOP pages, the platform performs its normal authentication and permission check before our code runs at all. There is no second login, no token passed between systems, and no separate list of who counts as staff that could fall out of date.
 - **Permission is per course, not per server.** Being staff on one course grants no access to any other course's analytics. Every request names the course it concerns, and we ask CAT-SOOP about that specific course. This matters on a shared institute server where several courses run side by side.
 - **We do not store answers.** The activity records contain the actual text students submitted. None of our metrics need it, so we discard it during extraction. This removes a large category of privacy risk for essentially no cost.
 - **Small groups are suppressed.** Statistics for any group of fewer than five students are hidden, so section-level views cannot be used to work out an individual's results.
@@ -425,37 +435,9 @@ The dashboard contains students' academic records, so access control is a core r
 
 ---
 
-## 11. Proof of concept
 
-Before building the full system, we will prove the idea end to end on a local installation.
 
-**Plan:**
-
-1. Install CAT-SOOP locally and get it running.
-2. Create a small test course of six modules with a mixture of question types and difficulties.
-3. Create around 60 test students following five behaviour patterns.
-4. Run a script that logs in as each student and works through the course over the web, exactly as a real student would.
-5. Extract the resulting data, load it, and display it.
-
-**The five student patterns:**
-
-| Pattern | Behaviour | Should appear as |
-|---|---|---|
-| A | Completes everything, mostly first attempt | Top performer, no flags |
-| B | Many attempts, scores steadily improve | Improvement visible across attempts |
-| C | Stops entirely after Module 2 | Flagged as inactive and behind |
-| D | Repeatedly fails one quiz, continues elsewhere | Flagged for repeated failure; makes that quiz look hard |
-| E | Opens Module 4 but never attempts it | **Reached but not started** |
-
-Pattern E is the important one. It is the only pattern that cannot be detected without our page-visit plugin. If the dashboard can tell student E apart from a student who never opened Module 4 at all, the instrumentation works.
-
-We will use 60 students rather than 5 because five is not enough to produce meaningful averages or to test our rule about hiding statistics for small samples.
-
-**Crucially, we will generate this data by actually using the platform over the web**, not by writing data files ourselves. Fabricated data would prove nothing. The whole point is to show that the data CAT-SOOP genuinely produces is sufficient.
-
----
-
-## 12. Scope
+## 11. Scope
 
 ### First phase — the working system
 
@@ -466,9 +448,9 @@ We will use 60 students rather than 5 because five is not enough to produce mean
 5. Progress tracking — reached, started, completed
 6. Course overview, module, student and question views
 7. Basic activity timeline
-8. Reverse proxy setup so CAT-SOOP and the dashboard share one address
+8. Analytics pages added to the course, protected by CAT-SOOP's permission system
 9. Role-based landing pages for guest, student and instructor
-10. Sign-in handover from CAT-SOOP, with no second login
+10. Staff-only Analytics link in the course menu
 
 ### Second phase — the valuable additions
 
@@ -485,7 +467,7 @@ We consider the first phase the minimum that demonstrates the project works, and
 
 ---
 
-## 13. Plan of work
+## 12. Plan of work
 
 | Weeks | Focus | Completed when |
 |---|---|---|
@@ -494,8 +476,8 @@ We consider the first phase the minimum that demonstrates the project works, and
 | 2–3 | Page-visit plugin | Visits are recorded; submissions do not create false visits |
 | 3–4 | Extractor and database | Our attempt counts match CAT-SOOP's own for every student |
 | 5–6 | Analytics calculations | Every summary can be rebuilt from scratch and matches hand-checked values |
-| 5–7 | API and dashboard | The professor's account can open it; a student account cannot |
-| 7 | Same-address setup and role-based landing pages | Guest, student and instructor each land somewhere different; the professor reaches analytics from the course menu without logging in again |
+| 5–7 | Analytics pages inside CAT-SOOP | The professor's account can open them from the course menu; a student typing the address directly is refused |
+| 7 | Role-based landing pages | Guest, student and instructor each land somewhere different |
 | 8–9 | Difficulty and attention list | The deliberately flawed question is correctly identified |
 | 9 | Trends and export | Exported data matches what is shown on screen |
 | 10 | Incremental updates and scale test | A 5,000-student test course updates in under a minute |
@@ -506,36 +488,6 @@ The order is deliberate. The two things that could sink the project — getting 
 
 ---
 
-## 14. Risks
 
-| Risk | How we handle it |
-|---|---|
-| CAT-SOOP does not run on current Python versions | Use an older Python version in a dedicated environment; resolve in week 1 |
-| The live installation stores data in encrypted form, making our fast update method unavailable | Confirm with the professor early; we have a fallback approach |
-| Questions without explicit names could shift identity if the professor reorders a page | Detect this situation and warn, rather than silently reporting wrong history |
-| Our plugin causes an error on a live page | Write it defensively and test thoroughly on our own installation first |
-| Scope creep into unnecessary features | Google Classroom integration, account automation and machine learning are explicitly out of scope |
 
-### Honest limitations
 
-We want to state clearly what this system will *not* do:
-
-- It cannot measure how long a student spends reading. We can record that a page was opened, not that it was read.
-- It measures performance on graded exercises, not learning. A module can look easy because it is well taught or because its questions are trivial, and we cannot tell those apart.
-- The attention list highlights students worth looking at. It does not predict who will fail, and we will label it that way in the interface so it is not over-trusted.
-
----
-
-## 15. Expected outcome
-
-At the end of the semester we expect to deliver:
-
-1. A working analytics dashboard, running against a real CAT-SOOP installation
-2. A data pipeline that keeps it up to date automatically
-3. A small plugin that adds page-visit tracking to CAT-SOOP without modifying it
-4. Documentation allowing the professor, or a future team, to deploy and extend it
-5. This design report, together with our findings about how CAT-SOOP stores its data
-
-The wider value is that none of this is specific to Digital Systems. Any course running on CAT-SOOP could use the same system by pointing it at a different course folder — which matters if the platform is adopted more widely at the institute.
-
----
