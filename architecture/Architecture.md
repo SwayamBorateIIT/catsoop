@@ -3,6 +3,7 @@
 **Course:** Software Tools and Techniques for CSE · IIT Gandhinagar
 **Submission:** 2 — Architecture and design
 **Builds on:** Project Plan (Submission 1)
+**Diagrams:** Figures 1–6 are in `Architecture.pdf`
 
 ---
 
@@ -93,56 +94,13 @@ CAT-SOOP remains the source of truth. If the analytics database were deleted, re
 
 ### Components and how they interact
 
-```mermaid
-flowchart TB
-  browser["Browser"]
+Browsers reach CAT-SOOP's existing web server, where our **visit plugin** and **analytics handler** run. Student activity, grader scores and visits go into CAT-SOOP's log store. The **nightly extractor** reads that store and writes PostgreSQL; the handler only reads PostgreSQL.
 
-  subgraph web["CAT-SOOP web server — existing"]
-    dispatch["Request dispatch + login"]
-    pages["Course pages<br/>(existing)"]
-    plugin["Visit plugin<br/>NEW"]
-    handler["Analytics handler<br/>NEW"]
-  end
-
-  grader["Checker / grader<br/>existing"]
-  logs[("CAT-SOOP log store<br/>activity · scores · visits")]
-
-  job["Nightly extractor<br/>NEW"]
-  db[("PostgreSQL<br/>facts + summaries<br/>NEW")]
-
-  browser -- "HTTPS" --> dispatch
-  dispatch --> pages
-  dispatch --> handler
-  dispatch -. "hook" .-> plugin
-  pages -- "submissions" --> logs
-  grader -- "scores" --> logs
-  plugin -- "1 visit / session" --> logs
-  job -- "reads via CAT-SOOP API" --> logs
-  job -- "writes summaries" --> db
-  handler -- "reads summaries only" --> db
-```
+*Figure 1 — Components and how they interact (diagram in the PDF).*
 
 ### Run-time processes
 
-```mermaid
-flowchart LR
-  users["Browsers"]
-  subgraph server["Course server"]
-    subgraph cs["catsoop start — existing processes"]
-      w["Web workers<br/>+ analytics handler and plugin"]
-      g["Checker / grader"]
-    end
-    t["Nightly timer"] -- "launches" --> x["Extractor process<br/>runs, then exits"]
-    fs[("CAT-SOOP data<br/>courses + logs")]
-    pg[("PostgreSQL service")]
-  end
-  users -- "HTTPS" --> w
-  w -- "read / write" --> fs
-  g -- "read / write" --> fs
-  x -- "read only" --> fs
-  x -- "write" --> pg
-  w -- "read only" --> pg
-```
+*Figure 2 — Run-time processes (diagram in the PDF).*
 
 | Process | Started by | Role |
 |---|---|---|
@@ -168,43 +126,15 @@ The extractor writes each run in **one transaction** and publishes it atomically
 
 ### Instructor opens the dashboard; a student tries the same URL
 
-```mermaid
-sequenceDiagram
-  actor I as Instructor
-  actor S as Student
-  participant C as CAT-SOOP
-  participant H as Analytics handler
-  participant DB as PostgreSQL
-  I->>C: GET /course/analytics/modules
-  C->>C: Log in, load role and permissions
-  C->>H: handle(request)
-  H->>H: Has whdw permission? Yes
-  H->>DB: SELECT from summary tables
-  DB-->>H: Rows
-  H-->>I: Dashboard page
-  S->>C: GET /course/analytics/modules
-  C->>H: handle(request)
-  H->>H: Has whdw permission? No
-  H-->>S: 403 Refused (no data read)
-```
+CAT-SOOP logs the user in first. The analytics handler then checks the `whdw` permission **before** any query: an instructor gets summary rows, a student gets 403 and no data is read.
+
+*Figure 3 — Access check, instructor vs. student (diagram in the PDF).*
 
 ### Nightly extraction
 
-```mermaid
-sequenceDiagram
-  participant T as Timer
-  participant X as Extractor
-  participant CS as CAT-SOOP API
-  participant DB as PostgreSQL
-  T->>X: Start run
-  X->>CS: Student list, course structure
-  loop each student × page
-    X->>CS: Read new log entries since last run
-    X->>CS: Fetch checker score for each submission
-  end
-  X->>X: Normalise, validate, compute summaries
-  X->>DB: Write facts + summaries, publish run (one transaction)
-```
+The timer starts the extractor. It fetches the roster, course structure, new log entries and checker scores through CAT-SOOP's API, then normalises and validates them, computes summaries, and writes and publishes everything in one transaction.
+
+*Figure 4 — Nightly extraction run (diagram in the PDF).*
 
 ### Data structures
 
@@ -220,40 +150,9 @@ sequenceDiagram
 
 **Analytics database (output):**
 
-```mermaid
-erDiagram
-  OFFERING ||--o{ MODULE : contains
-  MODULE ||--o{ QUESTION : contains
-  OFFERING ||--o{ ENROLMENT : has
-  STUDENT ||--o{ ENROLMENT : "enrolled as"
-  ENROLMENT ||--o{ ATTEMPT : makes
-  QUESTION ||--o{ ATTEMPT : receives
-  ENROLMENT ||--o{ VISIT : makes
-  OFFERING ||--o{ RUN : "refreshed by"
-  RUN ||--o{ SUMMARY : produces
+A course **offering** contains modules and questions; students **enrol** in an offering; **attempts** and **visits** belong to an enrolment; each extraction **run** produces the **summaries** that pages read.
 
-  OFFERING {
-    text course "digital-systems-2026"
-    int current_run
-  }
-  STUDENT {
-    text username
-    text pseudonym
-  }
-  ATTEMPT {
-    int attempt_no
-    timestamp submitted_at
-    text status "graded | pending"
-    real score
-  }
-  VISIT {
-    timestamp visited_at
-  }
-  SUMMARY {
-    text level "module | question | student"
-    jsonb metrics
-  }
-```
+*Figure 5 — Analytics database schema (diagram in the PDF).*
 
 *Facts* (attempts, visits) can always be rebuilt from CAT-SOOP. *Summaries* are tied to a run, so pages always read one consistent snapshot.
 
@@ -281,33 +180,7 @@ analytics/
 
 ### Module interaction
 
-```mermaid
-flowchart LR
-  subgraph host["CAT-SOOP"]
-    api["cslog · csqueue · user"]
-    disp["dispatch"]
-  end
-  subgraph kit["course_kit"]
-    plug["plugin"]
-    hand["handler"]
-  end
-  subgraph pkg["catsoop_analytics"]
-    cli["cli"] --> ext["extract"]
-    ext --> src["source"]
-    ext --> met["metrics"]
-    ext --> sto["store"]
-    web["web"]
-  end
-  db[("PostgreSQL")]
-
-  disp -- "runs hook" --> plug
-  plug -- "append visit" --> api
-  disp -- "calls" --> hand
-  hand -- "calls" --> web
-  src -- "Python API" --> api
-  sto -- "SQL write" --> db
-  web -- "SQL read-only" --> db
-```
+*Figure 6 — Module interaction (diagram in the PDF).*
 
 | From → To | Communication |
 |---|---|
